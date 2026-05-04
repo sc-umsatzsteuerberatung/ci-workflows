@@ -1,0 +1,137 @@
+name: sign-release
+
+# Reusable workflow: signs release assets matching `artifact_glob` with
+# minisign and uploads the resulting `.minisig` files back to the same release.
+#
+# Consume from another repo with:
+#
+#   jobs:
+#     sign:
+#       uses: <org>/ci-workflows/.github/workflows/sign-release.yml@v1
+#       with:
+#         artifact_glob: "*-{linux,windows}-*.{tar.gz,zip}"
+#         release_tag: ${{ github.event.release.tag_name }}
+#       secrets: inherit   # MINISIGN_PRIVATE_KEY + MINISIGN_KEY_PASSWORD
+#
+# Always pin `@<tag>` or `@<sha>`, never `@main` — a compromise of this repo
+# would otherwise propagate instantly to every consumer.
+
+on:
+  workflow_call:
+    inputs:
+      artifact_glob:
+        description: "Shell glob (expanded by bash) selecting assets to sign"
+        type: string
+        required: true
+      release_tag:
+        description: "Git tag of the release whose assets should be signed"
+        type: string
+        required: true
+    secrets:
+      MINISIGN_PRIVATE_KEY:
+        description: "Contents of the minisign secret key file"
+        required: true
+      MINISIGN_KEY_PASSWORD:
+        description: "Password protecting the minisign secret key"
+        required: true
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to upload .minisig assets back to the release
+    steps:
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends minisign
+          minisign -v
+
+      - name: Prepare workspace
+        id: prep
+        run: |
+          set -euo pipefail
+          workdir="$RUNNER_TEMP/sign-release"
+          mkdir -p "$workdir"
+          echo "workdir=$workdir" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.release_tag }}
+          GLOB: ${{ inputs.artifact_glob }}
+        working-directory: ${{ steps.prep.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          # `--pattern` accepts a glob and is matched against asset filenames.
+          gh release download "$TAG" --repo "$REPO" --pattern "$GLOB"
+          echo "Downloaded:"
+          ls -la
+
+      - name: Materialise key
+        env:
+          KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        working-directory: ${{ steps.prep.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$KEY" > minisign.key
+          # Sanity check: minisign refuses to sign with a malformed key,
+          # surface that early rather than after we've started signing.
+          test -s minisign.key
+
+      - name: Sign assets
+        env:
+          PW: ${{ secrets.MINISIGN_KEY_PASSWORD }}
+          TAG: ${{ inputs.release_tag }}
+          GLOB: ${{ inputs.artifact_glob }}
+        working-directory: ${{ steps.prep.outputs.workdir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob extglob
+
+          # Expand the glob the same way bash would in an interactive shell.
+          # We deliberately do NOT quote $GLOB here so that brace expansion
+          # and wildcard matching apply.
+          # shellcheck disable=SC2086
+          files=( $GLOB )
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "::error ::No release assets matched glob '$GLOB'"
+            exit 1
+          fi
+
+          for f in "${files[@]}"; do
+            [[ "$f" == *.minisig ]] && continue   # don't sign signatures
+            echo "Signing $f"
+            printf '%s\n' "$PW" | minisign -Sm "$f" \
+              -s minisign.key \
+              -t "release ${TAG} of $(basename "$f")"
+          done
+
+      - name: Upload signatures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.release_tag }}
+        working-directory: ${{ steps.prep.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sigs=( *.minisig )
+          if [[ ${#sigs[@]} -eq 0 ]]; then
+            echo "::error ::No .minisig files were produced"
+            exit 1
+          fi
+          # --clobber so re-runs replace any previous .minisig for the same asset.
+          gh release upload "$TAG" --repo "$REPO" --clobber "${sigs[@]}"
+
+      - name: Wipe key material
+        if: always()
+        working-directory: ${{ steps.prep.outputs.workdir }}
+        run: |
+          if [[ -f minisign.key ]]; then
+            shred -u minisign.key || rm -f minisign.key
+          fi

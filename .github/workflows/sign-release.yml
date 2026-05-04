@@ -19,8 +19,13 @@ name: sign-release
 on:
   workflow_call:
     inputs:
-      artifact_glob:
-        description: "Shell glob (expanded by bash) selecting assets to sign"
+      artifact_globs:
+        description: |
+          Newline-separated list of globs selecting assets to sign. Each line
+          is a plain glob (e.g. `release-*.tar.gz`). Brace expansion is NOT
+          supported because bash does brace expansion before parameter
+          expansion, so a glob substituted from a variable never gets
+          brace-expanded — pass each suffix on its own line instead.
         type: string
         required: true
       release_tag:
@@ -89,20 +94,27 @@ jobs:
         env:
           PW: ${{ secrets.MINISIGN_KEY_PASSWORD }}
           TAG: ${{ inputs.release_tag }}
-          GLOB: ${{ inputs.artifact_glob }}
+          GLOBS: ${{ inputs.artifact_globs }}
         working-directory: ${{ steps.prep.outputs.workdir }}
         shell: bash
         run: |
           set -euo pipefail
           shopt -s globstar nullglob extglob
 
-          # Expand the glob the same way bash would in an interactive shell.
-          # We deliberately do NOT quote $GLOB here so that brace expansion
-          # and wildcard matching apply.
-          # shellcheck disable=SC2086
-          files=( $GLOB )
+          files=()
+          while IFS= read -r pattern; do
+            # Trim whitespace; skip blank lines.
+            pattern="${pattern#"${pattern%%[![:space:]]*}"}"
+            pattern="${pattern%"${pattern##*[![:space:]]}"}"
+            [[ -z "$pattern" ]] && continue
+            # shellcheck disable=SC2086 -- intentional unquoted glob expansion.
+            matches=( $pattern )
+            files+=( "${matches[@]}" )
+          done <<< "$GLOBS"
+
           if [[ ${#files[@]} -eq 0 ]]; then
-            echo "::error ::No release assets matched glob '$GLOB'"
+            echo "::error ::No release assets matched any of the provided globs"
+            printf '  %s\n' "$GLOBS"
             exit 1
           fi
 

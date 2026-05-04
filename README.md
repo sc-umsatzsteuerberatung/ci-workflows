@@ -32,10 +32,14 @@ jobs:
     needs: build
     uses: <org>/ci-workflows/.github/workflows/sign-release.yml@v1
     with:
-      artifact_glob: "*-{linux,windows}-*.{tar.gz,zip}"
+      artifact_globs: |
+        release-*.tar.gz
+        release-*.zip
       release_tag: ${{ github.event.release.tag_name }}
     secrets: inherit
 ```
+
+**Note:** `artifact_globs` is newline-separated, one plain glob per line. Brace expansion (`{tar.gz,zip}`) is NOT supported because bash performs brace expansion before parameter expansion, so a brace-pattern coming from a variable never gets expanded.
 
 **Pin the version.** Always reference a tag (`@v1`) or commit SHA — never `@main`. A compromise of this repository would otherwise propagate instantly to every consumer's signing pipeline.
 

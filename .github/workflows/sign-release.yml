@@ -61,12 +61,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ inputs.release_tag }}
-          GLOB: ${{ inputs.artifact_glob }}
         working-directory: ${{ steps.prep.outputs.workdir }}
         run: |
           set -euo pipefail
-          # `--pattern` accepts a glob and is matched against asset filenames.
-          gh release download "$TAG" --repo "$REPO" --pattern "$GLOB"
+          # We deliberately download ALL release assets here rather than
+          # passing --pattern, because gh's --pattern uses Go's filepath.Match
+          # which does NOT understand bash brace expansion (e.g. "{tar.gz,zip}"
+          # would be matched as a literal string). The actual filtering is
+          # done by bash in the next step, which does understand braces.
+          gh release download "$TAG" --repo "$REPO"
           echo "Downloaded:"
           ls -la
 
